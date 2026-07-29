@@ -10,7 +10,7 @@
 
 ## 中文
 
-主线用强模型（如 Fable 5）做判断与定案，所有已定案的代码实施自动下沉给 Opus 4.8 执行官——半价施工，且实施过程不污染主线上下文。
+主线用强模型（如 Fable 5）做判断与定案，所有已定案的代码实施自动下沉给 Opus 5 执行官——半价施工，且实施过程不污染主线上下文。
 
 **名字由来**：墨斗是木匠弹线定位的工具。主线弹线，工匠照线施工。
 
@@ -19,7 +19,7 @@
 ```mermaid
 sequenceDiagram
     participant M as 主线-强模型
-    participant D as 墨斗-Opus 4.8
+    participant D as 墨斗-Opus 5
     M->>M: 判断并定案
     M->>D: 下发任务单-五项
     D->>D: 施工并自验
@@ -68,7 +68,7 @@ flowchart TD
 
 > 在 /tmp/t 写个 hello.py 并跑通。
 
-观察主线是否自动出现对 executor 的委派（会看到 Task/Agent 调用，模型为 `claude-opus-4-8`）。
+观察主线是否自动出现对 executor 的委派（会看到 Task/Agent 调用，模型为 `claude-opus-5`）。
 
 ### 任务单协议
 
@@ -99,12 +99,35 @@ flowchart TD
 2. **任务单五项写全**：尤其第 5 项"验证命令与环境坑"——墨斗不继承主线记忆（例：某目录构建慢需先拷到本地临时目录再做），任务单是唯一信息通道。
 3. **返工续同一个 executor**：主线审查发现问题时续原 agent（保留它的实施上下文），不要新开一个从零读文件。
 4. **高危项主线复跑**：报告里有"高危标注"（删数据/迁移/公开接口/依赖升级）时，主线必须亲自重跑验收命令后才放行——报告是自述，不是证据。
-5. **成本直觉**：Opus 4.8 是 Fable 5 半价，且实施过程不进主线上下文，会话越长省得越多。
+5. **成本直觉**：Opus 5 是 Fable 5 半价，且实施过程不进主线上下文，会话越长省得越多。
 
 ### 成本
 
-- Opus 4.8 为 Fable 5 半价：**$5 / $25** 每百万 token（输入/输出），对比 Fable 5 的 $10 / $50，同 tokenizer。
+- Opus 5 为 Fable 5 半价：**$5 / $25** 每百万 token（输入/输出），对比 Fable 5 的 $10 / $50，同 tokenizer。
 - 实施过程的全部 token 不进主线上下文，会话越长省得越多。
+
+### 管理后台
+
+仓库自带一个零依赖的本地管理后台（Python 3 标准库，单文件），提供两大功能：
+
+```bash
+python3 admin/modou_admin.py          # 默认 http://127.0.0.1:8848
+```
+
+**1. 消耗检查** —— 直接解析本机 Claude Code 的会话记录（`~/.claude/projects/**/*.jsonl`），无需 API key：
+
+- 按 **昨天 / 本周 / 本月**（以及今天、全部）统计 token 消耗与费用；
+- **调配情况**：主线 vs 墨斗的花费对比、委派率（按输出 token）、"墨斗为你省下"金额（对比全部由主模型施工的假想费用）；
+- 按模型明细（输入/输出/缓存读/缓存写/费用）与每日费用柱状图；
+- 费用按内置价格表计算（缓存写 1.25×/2×、缓存读 0.1× 输入价）。
+
+**2. 模型设置**：
+
+- **主模型**：默认勾选"自动选择最贵"（当前即 Fable 5，$10/$50），也可手动指定；写入 `~/.claude/settings.json` 的 `model` 字段。
+- **执行官（墨斗）模型**：手动下拉选择（当前推荐 Opus 5），写入 `executor.md` 的 frontmatter，新开会话生效。
+- 若执行官不便宜于主模型，页面会警告"同级转包纯增开销"。
+
+另附健康检查（执行官是否安装、用量目录是否存在）和内置价格表。后台只监听 127.0.0.1，不联网、不读写任何密钥。
 
 ### 实测记录（2026-07-20）
 
@@ -118,8 +141,8 @@ flowchart TD
 
 ### 前提
 
-- 主线模型须**强于** Opus 4.8——否则是同级转包，纯增开销。
-- 账号须可用 model id `claude-opus-4-8`。
+- 主线模型须**强于** Opus 5——否则是同级转包，纯增开销。
+- 账号须可用 model id `claude-opus-5`。
 
 ### 仓库结构
 
@@ -127,6 +150,8 @@ flowchart TD
 .
 ├── README.md            # 本文件
 ├── install.sh           # 一键安装脚本（复制 agent 到 ~/.claude/agents/）
+├── admin/
+│   └── modou_admin.py   # 管理后台：消耗检查 + 模型设置（零依赖，本地运行）
 └── agents/
     └── executor.md      # 墨斗执行官的 agent 定义（核心文件）
 ```
@@ -137,7 +162,7 @@ flowchart TD
 
 ## English
 
-**Modou** (墨斗, *mòdǒu*) is a dual-model executor agent for [Claude Code](https://claude.com/claude-code). The main session runs on a stronger model (e.g. Fable 5) and handles all judgment and decision-making; every piece of *already-decided* implementation work is automatically delegated to an Opus 4.8 executor agent — built at half the price, without polluting the main session's context.
+**Modou** (墨斗, *mòdǒu*) is a dual-model executor agent for [Claude Code](https://claude.com/claude-code). The main session runs on a stronger model (e.g. Fable 5) and handles all judgment and decision-making; every piece of *already-decided* implementation work is automatically delegated to an Opus 5 executor agent — built at half the price, without polluting the main session's context.
 
 **About the name**: A *modou* (ink line marker) is the carpenter's tool for snapping a straight chalk line. The main session snaps the line; the craftsman builds along it.
 
@@ -146,7 +171,7 @@ flowchart TD
 ```mermaid
 sequenceDiagram
     participant M as Main session (strong model)
-    participant D as Modou (Opus 4.8)
+    participant D as Modou (Opus 5)
     M->>M: Decide and finalize the plan
     M->>D: Issue a 5-part work order
     D->>D: Implement and self-verify
@@ -184,7 +209,7 @@ Open a fresh session and toss in a small implementation task, e.g.:
 
 > Write a hello.py under /tmp/t and make it run.
 
-Watch whether the main session automatically delegates to the executor (you'll see a Task/Agent call with model `claude-opus-4-8`).
+Watch whether the main session automatically delegates to the executor (you'll see a Task/Agent call with model `claude-opus-5`).
 
 ### The work-order protocol
 
@@ -215,12 +240,35 @@ Modou always delivers a fixed six-section report, designed for a one-minute revi
 2. **Fill in all five parts of the work order** — especially part 5, "verification commands & environment pitfalls". Modou does not inherit the main session's memory (e.g. "this directory builds slowly; copy it to a local temp dir first"); the work order is the only channel.
 3. **Rework continues on the same executor**: when review finds a problem, continue the original agent (it keeps its implementation context) instead of spawning a fresh one that re-reads everything from zero.
 4. **Re-run high-risk items yourself**: if the report carries any high-risk flag (data deletion / migration / public API / dependency upgrade), the main session must personally re-run the acceptance commands before sign-off — a report is self-testimony, not evidence.
-5. **Cost intuition**: Opus 4.8 runs at half the price of Fable 5, and none of the implementation tokens enter the main session's context — the longer the session, the more you save.
+5. **Cost intuition**: Opus 5 runs at half the price of Fable 5, and none of the implementation tokens enter the main session's context — the longer the session, the more you save.
 
 ### Cost
 
-- Opus 4.8 is half the price of Fable 5: **$5 / $25** per million tokens (input/output), vs. Fable 5's $10 / $50, with the same tokenizer.
+- Opus 5 is half the price of Fable 5: **$5 / $25** per million tokens (input/output), vs. Fable 5's $10 / $50, with the same tokenizer.
 - All implementation tokens stay out of the main session's context; longer sessions save more.
+
+### Admin console
+
+The repo ships a zero-dependency local admin console (single file, Python 3 standard library only) with two main features:
+
+```bash
+python3 admin/modou_admin.py          # defaults to http://127.0.0.1:8848
+```
+
+**1. Usage check** — parses your local Claude Code session records (`~/.claude/projects/**/*.jsonl`) directly; no API key required:
+
+- Token usage and cost by **yesterday / this week / this month** (plus today and all-time);
+- **Delegation overview**: main session vs. Modou spend, delegation ratio (by output tokens), and "saved by Modou" — the difference versus the hypothetical cost of running all implementation on the main model;
+- Per-model breakdown (input / output / cache read / cache write / cost) and a daily cost bar chart;
+- Costs computed from a built-in price table (cache write at 1.25×/2×, cache read at 0.1× of the input price).
+
+**2. Model settings**:
+
+- **Main model**: "auto-select the most expensive" is checked by default (currently Fable 5, $10/$50); manual selection is also available. Written to the `model` field of `~/.claude/settings.json`.
+- **Executor (Modou) model**: manual dropdown (Opus 5 is the current recommendation), written into the frontmatter of `executor.md`; takes effect in new sessions.
+- If the executor is not cheaper than the main model, the page warns that peer-to-peer subcontracting is pure overhead.
+
+Also includes a health check (executor installed? usage directory present?) and the built-in price table. The console binds to 127.0.0.1 only — no network calls, no secrets touched.
 
 ### Field-test log (2026-07-20)
 
@@ -234,8 +282,8 @@ Roughly 140k tokens across the three rounds, all billed at Opus half-price; the 
 
 ### Prerequisites
 
-- The main-session model must be **stronger than** Opus 4.8 — otherwise it's peer-to-peer subcontracting, pure overhead.
-- Your account must have access to model id `claude-opus-4-8`.
+- The main-session model must be **stronger than** Opus 5 — otherwise it's peer-to-peer subcontracting, pure overhead.
+- Your account must have access to model id `claude-opus-5`.
 
 ### Repository layout
 
@@ -243,6 +291,8 @@ Roughly 140k tokens across the three rounds, all billed at Opus half-price; the 
 .
 ├── README.md            # This file
 ├── install.sh           # One-shot installer (copies the agent into ~/.claude/agents/)
+├── admin/
+│   └── modou_admin.py   # Admin console: usage check + model settings (zero-dependency, local)
 └── agents/
     └── executor.md      # The Modou executor agent definition (the core file)
 ```
