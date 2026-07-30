@@ -125,6 +125,7 @@ python3 admin/modou_admin.py          # 默认 http://127.0.0.1:8848
 
 - **主模型**：默认勾选"自动选择最贵"（当前即 Fable 5，$10/$50），也可手动指定；写入 `~/.claude/settings.json` 的 `model` 字段。
 - **执行官（墨斗）模型**：手动下拉选择（当前推荐 Opus 5），写入 `executor.md` 的 frontmatter，新开会话生效。
+- **执行官速度档位（effort）**：`low / medium / high / xhigh / max` 或跟随会话默认，同样写入 frontmatter。子代理不支持 `/fast` 极速模式，effort 是 Claude Code 官方支持的提速手段——档位越低施工越快、token 越省（思考更少）；墨斗做的是"照单施工"的机械性工作，默认 `medium`，嫌慢可调 `low`。
 - 若执行官不便宜于主模型，页面会警告"同级转包纯增开销"。
 
 另附健康检查（执行官是否安装、用量目录是否存在）和内置价格表。后台只监听 127.0.0.1，不联网、不读写任何密钥。
@@ -266,6 +267,7 @@ python3 admin/modou_admin.py          # defaults to http://127.0.0.1:8848
 
 - **Main model**: "auto-select the most expensive" is checked by default (currently Fable 5, $10/$50); manual selection is also available. Written to the `model` field of `~/.claude/settings.json`.
 - **Executor (Modou) model**: manual dropdown (Opus 5 is the current recommendation), written into the frontmatter of `executor.md`; takes effect in new sessions.
+- **Executor speed tier (effort)**: `low / medium / high / xhigh / max`, or inherit the session default — also written into the frontmatter. Subagents don't support the `/fast` fast mode; `effort` is the officially supported speed lever in Claude Code — lower tiers build faster *and* spend fewer tokens (less thinking). Since Modou does mechanical build-to-spec work, the default is `medium`; drop to `low` if it still feels slow.
 - If the executor is not cheaper than the main model, the page warns that peer-to-peer subcontracting is pure overhead.
 
 Also includes a health check (executor installed? usage directory present?) and the built-in price table. The console binds to 127.0.0.1 only — no network calls, no secrets touched.

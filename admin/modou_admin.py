@@ -49,6 +49,10 @@ EXECUTOR_CHOICES = [
 ]
 MAIN_CHOICES = ["claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-sonnet-5"]
 
+# 执行官速度档位（frontmatter 的 effort 字段）。子代理不支持 /fast 极速模式，
+# effort 是官方支持的提速手段：档位越低思考越少 → 越快、越省 token。
+EFFORT_CHOICES = ["low", "medium", "high", "xhigh", "max"]
+
 
 def norm_model(model_id):
     """把带日期后缀的 id (claude-haiku-4-5-20251001) 归一到价格表键。"""
@@ -304,6 +308,33 @@ class Config:
         p.write_text(new_text, encoding="utf-8")
         return str(p)
 
+    # -- 执行官速度（effort）--------------------------------------------------
+    def get_executor_effort(self):
+        p = self.executor_file()
+        if not p:
+            return None
+        m = re.search(r"^effort:\s*(\S+)\s*$", p.read_text(encoding="utf-8"), re.M)
+        return m.group(1) if m else None
+
+    def set_executor_effort(self, effort):
+        """effort 为 EFFORT_CHOICES 之一；传 "" 表示删除该字段（跟随会话默认）。"""
+        p = self.executor_file()
+        if not p:
+            raise FileNotFoundError("找不到 executor.md（未安装墨斗？）")
+        text = p.read_text(encoding="utf-8")
+        if effort:
+            new_text, n = re.subn(r"^effort:\s*\S+\s*$", f"effort: {effort}",
+                                  text, count=1, flags=re.M)
+            if n == 0:  # 没有 effort 行，插到 model 行后面
+                new_text, n = re.subn(r"^(model:\s*\S+\s*)$", rf"\1\neffort: {effort}",
+                                      text, count=1, flags=re.M)
+                if n == 0:
+                    raise ValueError("executor.md frontmatter 里没有 model: 字段")
+        else:
+            new_text = re.sub(r"^effort:\s*\S+\s*\n?", "", text, count=1, flags=re.M)
+        p.write_text(new_text, encoding="utf-8")
+        return str(p)
+
 
 # ---------------------------------------------------------------------------
 # HTTP 服务
@@ -350,6 +381,8 @@ def make_handler(scanner, config):
                     "executor_model": exec_model,
                     "executor_path": exec_path,
                     "executor_choices": EXECUTOR_CHOICES,
+                    "executor_effort": config.get_executor_effort(),
+                    "effort_choices": EFFORT_CHOICES,
                     "prices": PRICES,
                     "settings_path": str(config.settings_path),
                     "projects_dir": str(scanner.projects_dir),
@@ -377,14 +410,19 @@ def make_handler(scanner, config):
                 self._json({"ok": True, "model": model})
             elif url.path == "/api/settings/executor":
                 model = payload.get("model")
+                effort = payload.get("effort", None)  # None=不动; ""=删除; 其他需合法
                 if model not in PRICES:
                     return self._json({"error": f"未知模型: {model}"}, 400)
+                if effort not in (None, "") and effort not in EFFORT_CHOICES:
+                    return self._json({"error": f"未知 effort: {effort}"}, 400)
                 try:
                     path = config.set_executor_model(model)
+                    if effort is not None:
+                        config.set_executor_effort(effort)
                 except (FileNotFoundError, ValueError) as e:
                     return self._json({"error": str(e)}, 400)
-                self._json({"ok": True, "model": model, "path": path,
-                            "note": "新开会话后生效"})
+                self._json({"ok": True, "model": model, "effort": effort,
+                            "path": path, "note": "新开会话后生效"})
             else:
                 self._json({"error": "not found"}, 404)
 
@@ -498,8 +536,12 @@ code { background:var(--accent-weak); padding:1px 5px; border-radius:4px; font-s
     <div class="row" style="margin-top:14px">
       <label>执行官（墨斗）模型：</label>
       <select id="execSelect"></select>
+      <label>速度档位：</label>
+      <select id="effortSelect"></select>
       <button class="primary" onclick="saveExec()">保存执行官</button>
     </div>
+    <div class="muted">速度档位即 effort：档位越低施工越快、token 越省（思考更少）。
+      子代理不支持 /fast 极速模式，effort 是官方支持的提速手段；机械性实施推荐 low / medium。</div>
     <div class="muted" id="execInfo"></div>
     <div class="muted" id="pairWarn" style="margin-top:6px"></div>
   </div>
@@ -594,8 +636,17 @@ async function loadSettings() {
   execSel.innerHTML = S.executor_choices.map(m =>
     `<option value="${m}">${S.prices[m].name} ($${S.prices[m].in}/$${S.prices[m].out})</option>`).join("");
   if (S.executor_model && S.prices[S.executor_model]) execSel.value = S.executor_model;
+
+  const effortNames = {low:"low · 最快", medium:"medium · 快（推荐）",
+    high:"high · 标准", xhigh:"xhigh · 深思", max:"max · 极限"};
+  $("effortSelect").innerHTML = '<option value="">跟随会话默认</option>' +
+    S.effort_choices.map(e => `<option value="${e}">${effortNames[e] || e}</option>`).join("");
+  $("effortSelect").value = S.executor_effort || "";
+
   $("execInfo").innerHTML = S.executor_model
-    ? `当前 executor.md 中：<code>${S.executor_model}</code>（${S.executor_path}）— 修改后新开会话生效`
+    ? `当前 executor.md 中：<code>${S.executor_model}</code>` +
+      (S.executor_effort ? `，effort <code>${S.executor_effort}</code>` : "") +
+      `（${S.executor_path}）— 修改后新开会话生效`
     : `<span class="warn">未找到已安装的 executor.md，请先安装墨斗（bash install.sh）。</span>`;
   updatePairWarn();
 
@@ -638,9 +689,9 @@ async function saveMain() {
 async function saveExec() {
   const r = await fetch("/api/settings/executor", {method:"POST",
     headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({model: $("execSelect").value})});
+    body: JSON.stringify({model: $("execSelect").value, effort: $("effortSelect").value})});
   const d = await r.json();
-  if (d.ok) { toast(`执行官已设为 ${d.model}，新开会话生效`); loadSettings(); loadUsage(currentRange); }
+  if (d.ok) { toast(`执行官已设为 ${d.model}${d.effort ? " / " + d.effort : ""}，新开会话生效`); loadSettings(); loadUsage(currentRange); }
   else toast(d.error || "失败", true);
 }
 
