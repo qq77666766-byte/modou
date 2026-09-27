@@ -97,16 +97,27 @@ def cost_usd(model_id, usage):
 
 # ---------------------------------------------------------------------------
 # 用量扫描：Claude Code 把每条 assistant 消息（含 usage）写进
-# ~/.claude/projects/<project>/<session>.jsonl。同一条消息可能因流式写入出现
-# 多行，用 (message.id, requestId) 去重。
+# ~/.claude/projects/<project>/<session>.jsonl；子代理的记录（isSidechain=true，
+# 带 agentId）写在 <session>/subagents/agent-<id>.jsonl（旧版在项目目录下）。
+# 同一条消息可能因流式写入出现多行，用 (message.id, requestId) 去重。
+#
+# 墨斗识别：不再只看"模型是不是执行官模型"，而是按身份：
+#   主线会话里 Task/Agent 工具调用带 subagent_type，其 tool_result 的
+#   toolUseResult.agentId 指向子代理 → 得到 agentId -> 子代理类型 的映射；
+#   另外兼容 agent-<id>.meta.json 里的 agentType。
+# 查不到类型的子代理记录才退回按模型推断。
 # ---------------------------------------------------------------------------
+AGENT_TOOLS = ("Task", "Agent")
+AGENT_FILE_RE = re.compile(r"^agent-([^.]+)$")
+
+
 class UsageScanner:
     def __init__(self, claude_dir):
         self.projects_dir = Path(claude_dir) / "projects"
-        self._file_cache = {}  # path -> (mtime, size, [records])
+        self._file_cache = {}  # path -> (mtime, size, parsed)
 
     def records(self):
-        out = []
+        out, uses, results, meta_types = [], {}, {}, {}
         if not self.projects_dir.is_dir():
             return out
         for path in self.projects_dir.rglob("*.jsonl"):
@@ -116,11 +127,24 @@ class UsageScanner:
                 continue
             cached = self._file_cache.get(str(path))
             if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
-                out.extend(cached[2])
-                continue
-            recs = self._parse_file(path)
-            self._file_cache[str(path)] = (st.st_mtime, st.st_size, recs)
-            out.extend(recs)
+                parsed = cached[2]
+            else:
+                parsed = self._parse_file(path)
+                self._file_cache[str(path)] = (st.st_mtime, st.st_size, parsed)
+            out.extend(parsed["recs"])
+            uses.update(parsed["uses"])
+            results.update(parsed["results"])
+        for path in self.projects_dir.rglob("agent-*.meta.json"):
+            t = self._read_meta_type(path)
+            if t:
+                meta_types[path.name[len("agent-"):-len(".meta.json")]] = t
+
+        # agentId -> 子代理类型
+        agent_types = dict(meta_types)
+        for tool_use_id, agent_id in results.items():
+            if tool_use_id in uses:
+                agent_types.setdefault(agent_id, uses[tool_use_id])
+
         # 跨文件也去重一次（同一请求可能被多个视图文件记录）
         seen, dedup = set(), []
         for r in out:
@@ -128,22 +152,40 @@ class UsageScanner:
             if key in seen:
                 continue
             seen.add(key)
+            r["agent_type"] = agent_types.get(r["agent_id"]) if r["agent_id"] else None
             dedup.append(r)
         return dedup
 
+    @staticmethod
+    def _read_meta_type(path):
+        try:
+            obj = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if isinstance(obj, dict):
+            return obj.get("agentType") or obj.get("subagent_type") or obj.get("agent_type")
+        return None
+
     def _parse_file(self, path):
         recs, seen = [], set()
+        uses, results = {}, {}  # tool_use_id -> subagent_type / agentId
+        m = AGENT_FILE_RE.match(path.stem)
+        file_agent_id = m.group(1) if m else None
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     line = line.strip()
-                    if '"usage"' not in line:
+                    if ('"usage"' not in line and '"subagent_type"' not in line
+                            and '"agentId"' not in line):
                         continue
                     try:
                         obj = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(obj, dict):
+                        continue
                     msg = obj.get("message") or {}
+                    self._collect_links(obj, msg, uses, results)
                     usage = msg.get("usage")
                     model = msg.get("model")
                     ts = obj.get("timestamp")
@@ -158,12 +200,14 @@ class UsageScanner:
                         dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
                     except ValueError:
                         continue
+                    sidechain = bool(obj.get("isSidechain"))
                     recs.append({
                         "key": key,
                         "dt": dt,
                         "model": norm_model(model),
                         "raw_model": model,
-                        "sidechain": bool(obj.get("isSidechain")),
+                        "sidechain": sidechain,
+                        "agent_id": (obj.get("agentId") or file_agent_id) if sidechain else None,
                         "usage": {
                             "input_tokens": usage.get("input_tokens", 0) or 0,
                             "output_tokens": usage.get("output_tokens", 0) or 0,
@@ -174,7 +218,24 @@ class UsageScanner:
                     })
         except OSError:
             pass
-        return recs
+        return {"recs": recs, "uses": uses, "results": results}
+
+    @staticmethod
+    def _collect_links(obj, msg, uses, results):
+        """记录 Task/Agent 调用的 subagent_type，以及其结果里回报的 agentId。"""
+        content = msg.get("content")
+        if not isinstance(content, list):
+            return
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "tool_use" and item.get("name") in AGENT_TOOLS:
+                inp = item.get("input") or {}
+                uses[item.get("id")] = inp.get("subagent_type") or "general-purpose"
+            elif item.get("type") == "tool_result":
+                tur = obj.get("toolUseResult")
+                if isinstance(tur, dict) and tur.get("agentId"):
+                    results[item.get("tool_use_id")] = tur["agentId"]
 
 
 def range_bounds(name):
@@ -191,13 +252,30 @@ def range_bounds(name):
     return None, now  # all
 
 
-def aggregate(records, start, end, main_model, executor_model):
+def classify(r, executor_model, executor_name):
+    """返回 (角色, 识别方式)。角色: main / modou / other；方式: exact / inferred。"""
+    if not r["sidechain"]:
+        return "main", "exact"
+    t = r.get("agent_type")
+    if t:
+        return ("modou" if t == executor_name else "other"), "exact"
+    # 子代理类型查不到（会话还在跑、或旧版日志）→ 按模型推断
+    if executor_model and r["model"] == executor_model:
+        return "modou", "inferred"
+    return "other", "inferred"
+
+
+def aggregate(records, start, end, main_model, executor_model, executor_name="executor"):
     by_model, daily = {}, {}
     totals = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0,
               "cost": 0.0, "requests": 0}
-    exec_stat = {"cost": 0.0, "output": 0, "requests": 0, "cost_if_main": 0.0}
+    exec_stat = {"cost": 0.0, "output": 0, "requests": 0, "cost_if_main": 0.0,
+                 "exact": 0, "inferred": 0}
     main_stat = {"cost": 0.0, "output": 0, "requests": 0}
-    main_price = PRICES.get(main_model)
+    other_stat = {"cost": 0.0, "output": 0, "requests": 0}
+    other_agents = {}
+    main_out_by_model = {}
+    modou_recs = []
 
     for r in records:
         if start and r["dt"] < start:
@@ -208,7 +286,8 @@ def aggregate(records, start, end, main_model, executor_model):
         c = cost_usd(m, u) or 0.0
         slot = by_model.setdefault(m, {"model": m, "name": PRICES.get(m, {}).get("name", m),
                                        "input": 0, "output": 0, "cache_write": 0,
-                                       "cache_read": 0, "cost": 0.0, "requests": 0})
+                                       "cache_read": 0, "cost": 0.0, "requests": 0,
+                                       "cost_main": 0.0, "cost_modou": 0.0, "cost_other": 0.0})
         slot["input"] += u["input_tokens"]
         slot["output"] += u["output_tokens"]
         slot["cache_write"] += u["cache_creation_input_tokens"]
@@ -222,24 +301,45 @@ def aggregate(records, start, end, main_model, executor_model):
         totals["cost"] += c
         totals["requests"] += 1
         day = r["dt"].strftime("%m-%d")
-        d = daily.setdefault(day, {"day": day, "cost": 0.0, "output": 0})
+        d = daily.setdefault(day, {"day": day, "cost": 0.0, "output": 0,
+                                   "main": 0.0, "modou": 0.0, "other": 0.0})
         d["cost"] += c
         d["output"] += u["output_tokens"]
 
-        if m == executor_model:
-            exec_stat["cost"] += c
-            exec_stat["output"] += u["output_tokens"]
-            exec_stat["requests"] += 1
-            if main_price:
-                exec_stat["cost_if_main"] += (cost_usd(main_model, u) or 0.0)
-        elif m == main_model:
-            main_stat["cost"] += c
-            main_stat["output"] += u["output_tokens"]
-            main_stat["requests"] += 1
+        role, how = classify(r, executor_model, executor_name)
+        d[role] += c
+        slot["cost_" + role] += c
+        stat = {"main": main_stat, "modou": exec_stat, "other": other_stat}[role]
+        stat["cost"] += c
+        stat["output"] += u["output_tokens"]
+        stat["requests"] += 1
+        if role == "main":
+            main_out_by_model[m] = main_out_by_model.get(m, 0) + u["output_tokens"]
+        elif role == "modou":
+            exec_stat[how] += 1
+            modou_recs.append(r)
+        else:
+            name = r.get("agent_type") or "未识别子代理"
+            a = other_agents.setdefault(name, {"type": name, "cost": 0.0, "output": 0,
+                                               "requests": 0, "models": set()})
+            a["cost"] += c
+            a["output"] += u["output_tokens"]
+            a["requests"] += 1
+            a["models"].add(m)
+
+    # 省钱基准：该时段主线实际用得最多的模型（按输出 token），没有则用设置里的主模型
+    baseline = max(main_out_by_model, key=main_out_by_model.get) if main_out_by_model else main_model
+    if baseline not in PRICES:
+        baseline = main_model
+    if PRICES.get(baseline):
+        for r in modou_recs:
+            exec_stat["cost_if_main"] += cost_usd(baseline, r["usage"]) or 0.0
 
     savings = max(0.0, exec_stat["cost_if_main"] - exec_stat["cost"])
     total_out = totals["output"]
     delegation_ratio = (exec_stat["output"] / total_out) if total_out else 0.0
+    for a in other_agents.values():
+        a["models"] = sorted(PRICES.get(x, {}).get("name", x) for x in a["models"])
     return {
         "start": start.isoformat() if start else None,
         "end": end.isoformat(),
@@ -248,6 +348,10 @@ def aggregate(records, start, end, main_model, executor_model):
         "daily": sorted(daily.values(), key=lambda x: x["day"]),
         "executor": exec_stat,
         "main": main_stat,
+        "other": other_stat,
+        "other_agents": sorted(other_agents.values(), key=lambda x: -x["cost"]),
+        "baseline_model": baseline,
+        "executor_name": executor_name,
         "savings": savings,
         "delegation_ratio": delegation_ratio,
     }
@@ -307,6 +411,15 @@ class Config:
             raise ValueError("executor.md frontmatter 里没有 model: 字段")
         p.write_text(new_text, encoding="utf-8")
         return str(p)
+
+    def get_executor_name(self):
+        """frontmatter 的 name 字段，即主线调用时的 subagent_type。"""
+        p = self.executor_file()
+        if p:
+            m = re.search(r"^name:\s*(\S+)\s*$", p.read_text(encoding="utf-8"), re.M)
+            if m:
+                return m.group(1)
+        return "executor"
 
     # -- 执行官速度（effort）--------------------------------------------------
     def get_executor_effort(self):
@@ -369,7 +482,8 @@ def make_handler(scanner, config):
                 exec_model, _ = config.get_executor_model()
                 main_model = norm_model(config.get_main_model()) or most_expensive_model()
                 data = aggregate(scanner.records(), start, end,
-                                 main_model, norm_model(exec_model))
+                                 main_model, norm_model(exec_model),
+                                 config.get_executor_name())
                 data["range"] = rng
                 self._json(data)
             elif url.path == "/api/settings":
@@ -475,7 +589,11 @@ th { color:var(--muted); font-weight:500; }
 .bars { display:flex; align-items:flex-end; gap:4px; height:110px; margin-top:8px; }
 .bcol { flex:1; display:flex; flex-direction:column; justify-content:flex-end;
   align-items:center; gap:4px; min-width:22px; }
-.bar { width:100%; background:var(--bar); border-radius:3px 3px 0 0; min-height:2px; }
+.stack { width:100%; display:flex; flex-direction:column; min-height:2px;
+  border-radius:3px 3px 0 0; overflow:hidden; }
+.seg { width:100%; min-height:1px; }
+.s-main { background:var(--bar2); } .s-modou { background:var(--bar); } .s-other { background:var(--warn); opacity:.6; }
+.dot { display:inline-block; width:9px; height:9px; border-radius:2px; margin:0 2px 0 8px; vertical-align:middle; }
 .blab { font-size:10px; color:var(--muted); white-space:nowrap; }
 .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:8px 0; }
 select,button { font:inherit; padding:6px 12px; border-radius:6px;
@@ -509,9 +627,11 @@ code { background:var(--accent-weak); padding:1px 5px; border-radius:4px; font-s
   </div>
 
   <div class="card">
-    <h2>调配情况（主线 vs 墨斗）</h2>
+    <h2>调配情况（主线 vs 墨斗 vs 其他子代理）</h2>
     <div class="kpis" id="delegation"></div>
     <div class="muted" id="delegationNote" style="margin-top:8px"></div>
+    <div class="muted" id="identNote" style="margin-top:4px"></div>
+    <div class="scroll" style="margin-top:10px"><table id="agentTable"></table></div>
   </div>
 
   <div class="card">
@@ -520,7 +640,8 @@ code { background:var(--accent-weak); padding:1px 5px; border-radius:4px; font-s
   </div>
 
   <div class="card">
-    <h2>每日费用</h2>
+    <h2>每日费用 <span class="muted"><span class="dot s-main"></span>主线
+      <span class="dot s-modou"></span>墨斗 <span class="dot s-other"></span>其他子代理</span></h2>
     <div class="bars" id="bars"></div>
   </div>
 
@@ -589,28 +710,50 @@ async function loadUsage(range) {
     kpi(fmtC(d.savings), "墨斗为你省下", true),
     kpi(fmtC(mn.cost), "主线花费"),
     kpi(fmtC(ex.cost), "墨斗花费"),
-    kpi(String(mn.requests), "主线请求"),
-    kpi(String(ex.requests), "墨斗请求"),
+    kpi(fmtC(d.other.cost), "其他子代理花费"),
+    kpi(`${mn.requests} / ${ex.requests} / ${d.other.requests}`, "请求数 主线/墨斗/其他"),
   ].join("");
+  const baseName = (S && S.prices[d.baseline_model] || {}).name || d.baseline_model;
   $("delegationNote").textContent = ex.requests === 0
     ? "该时段没有墨斗（执行官）的调用记录。实施类任务多让主线委派给墨斗，省钱又省上下文。"
-    : `若这些实施工作全由主模型完成需 ${fmtC(ex.cost_if_main)}，实际仅 ${fmtC(ex.cost)}。`;
+    : `若这些实施工作全由主线实际所用的 ${baseName} 完成需 ${fmtC(ex.cost_if_main)}，实际仅 ${fmtC(ex.cost)}。`;
+  $("identNote").innerHTML = ex.requests === 0 ? "" :
+    `墨斗识别：<b>${ex.exact}</b> 条按子代理身份（<code>${d.executor_name}</code>）精确识别` +
+    (ex.inferred ? `，<span class="warn">${ex.inferred} 条查不到身份、按执行官模型推断</span>（会话仍在进行或日志较旧）` : "") + "。";
+  $("agentTable").innerHTML = d.other_agents.length
+    ? "<tr><th>其他子代理（不计入墨斗）</th><th>请求</th><th>输出</th><th>模型</th><th>费用</th></tr>" +
+      d.other_agents.map(a => `<tr><td>${esc(a.type)}</td><td>${a.requests}</td><td>${fmtT(a.output)}</td>` +
+        `<td class="muted">${a.models.map(esc).join(", ")}</td><td>${fmtC(a.cost)}</td></tr>`).join("")
+    : "";
 
   const rows = d.by_model.map(m =>
     `<tr><td>${m.name}<div class="muted">${m.model}</div></td><td>${m.requests}</td>` +
     `<td>${fmtT(m.input)}</td><td>${fmtT(m.output)}</td><td>${fmtT(m.cache_read)}</td>` +
-    `<td>${fmtT(m.cache_write)}</td><td><b>${fmtC(m.cost)}</b></td></tr>`).join("");
+    `<td>${fmtT(m.cache_write)}</td><td><b>${fmtC(m.cost)}</b></td>` +
+    `<td class="muted">${split(m)}</td></tr>`).join("");
   $("modelTable").innerHTML =
-    "<tr><th>模型</th><th>请求</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>费用</th></tr>" +
-    (rows || "<tr><td colspan=7 class='muted'>该时段无记录</td></tr>");
+    "<tr><th>模型</th><th>请求</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>费用</th><th>主线/墨斗/其他</th></tr>" +
+    (rows || "<tr><td colspan=8 class='muted'>该时段无记录</td></tr>");
 
   const days = d.daily.slice(-31);
   const maxC = Math.max(...days.map(x => x.cost), 1e-9);
   $("bars").innerHTML = days.length
-    ? days.map(x => `<div class="bcol" title="${x.day}  ${fmtC(x.cost)}">` +
-        `<div class="bar" style="height:${Math.max(2, x.cost/maxC*90)}px"></div>` +
+    ? days.map(x => `<div class="bcol" title="${x.day}  ${fmtC(x.cost)}\n主线 ${fmtC(x.main)} · 墨斗 ${fmtC(x.modou)} · 其他 ${fmtC(x.other)}">` +
+        `<div class="stack" style="height:${Math.max(2, x.cost/maxC*90)}px">` +
+        ["other", "modou", "main"].map(k => x[k] > 0
+          ? `<div class="seg s-${k}" style="flex:${x[k] / x.cost}"></div>` : "").join("") + `</div>` +
         `<div class="blab">${x.day.slice(3)}</div></div>`).join("")
     : "<div class='muted'>该时段无记录</div>";
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+}
+
+function split(m) {
+  if (!m.cost) return "—";
+  const pct = v => Math.round(v / m.cost * 100) + "%";
+  return `${pct(m.cost_main)} / ${pct(m.cost_modou)} / ${pct(m.cost_other)}`;
 }
 
 function kpi(v, l, hl) {

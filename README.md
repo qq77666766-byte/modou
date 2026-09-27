@@ -117,7 +117,8 @@ python3 admin/modou_admin.py          # 默认 http://127.0.0.1:8848
 **1. 消耗检查** —— 直接解析本机 Claude Code 的会话记录（`~/.claude/projects/**/*.jsonl`），无需 API key：
 
 - 按 **昨天 / 本周 / 本月**（以及今天、全部）统计 token 消耗与费用；
-- **调配情况**：主线 vs 墨斗的花费对比、委派率（按输出 token）、"墨斗为你省下"金额（对比全部由主模型施工的假想费用）；
+- **调配情况**：主线 vs 墨斗 vs 其他子代理的花费对比、委派率（按输出 token）、"墨斗为你省下"金额（对比全部由主线实际所用模型施工的假想费用）；
+- **按身份识别墨斗**：不再只看模型名——从主线会话里的 Task/Agent 调用（`subagent_type`）和其结果中的 `agentId` 把每条子代理记录对到具体代理类型，所以 Explore 等其他子代理即使同样跑在 Opus 上也不会被算成墨斗，执行官换过模型后历史记录也不会错位；查不到身份的记录（会话仍在进行或旧版日志）才按执行官模型推断，页面会标出精确/推断各多少条；
 - 按模型明细（输入/输出/缓存读/缓存写/费用）与每日费用柱状图；
 - 费用按内置价格表计算（缓存写 1.25×/2×、缓存读 0.1× 输入价）。
 
@@ -259,7 +260,8 @@ python3 admin/modou_admin.py          # defaults to http://127.0.0.1:8848
 **1. Usage check** — parses your local Claude Code session records (`~/.claude/projects/**/*.jsonl`) directly; no API key required:
 
 - Token usage and cost by **yesterday / this week / this month** (plus today and all-time);
-- **Delegation overview**: main session vs. Modou spend, delegation ratio (by output tokens), and "saved by Modou" — the difference versus the hypothetical cost of running all implementation on the main model;
+- **Delegation overview**: main session vs. Modou vs. other subagents spend, delegation ratio (by output tokens), and "saved by Modou" — the difference versus the hypothetical cost of running that implementation on the model the main session actually used;
+- **Identity-based Modou detection**: instead of matching on model name alone, each subagent record is linked to its agent type via the main session's Task/Agent call (`subagent_type`) and the `agentId` in its result. Other subagents such as Explore are no longer counted as Modou even when they run on Opus, and history stays correct after you switch the executor model. Only records whose identity can't be resolved (session still running, or older logs) fall back to model-based inference, and the page shows how many were exact vs. inferred;
 - Per-model breakdown (input / output / cache read / cache write / cost) and a daily cost bar chart;
 - Costs computed from a built-in price table (cache write at 1.25×/2×, cache read at 0.1× of the input price).
 
