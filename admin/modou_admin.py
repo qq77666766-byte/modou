@@ -25,18 +25,24 @@ from urllib.parse import urlparse, parse_qs
 # ---------------------------------------------------------------------------
 # 价格表（美元 / 百万 token），缓存写默认按 1.25x 输入价，缓存读按 0.1x。
 # 若 usage 里带 ephemeral_1h_input_tokens 明细，则 1h 缓存写按 2x 计。
-# 数据截至 2026-07（Sonnet 5 为标准价，未按限时优惠计算）。
+# 数据截至 2026-10（官方价格表 2026-10-06 版）。新一代模型缓存读不再是 0.1x，
+# 用 "cr" 字段写绝对价；没写 "cr" 的模型仍按 0.1x 输入价。
 # ---------------------------------------------------------------------------
 PRICES = {
-    "claude-fable-5":   {"in": 10.0, "out": 50.0, "name": "Fable 5"},
-    "claude-mythos-5":  {"in": 10.0, "out": 50.0, "name": "Mythos 5"},
-    "claude-opus-5":    {"in": 5.0,  "out": 25.0, "name": "Opus 5"},
-    "claude-opus-4-8":  {"in": 5.0,  "out": 25.0, "name": "Opus 4.8"},
-    "claude-opus-4-7":  {"in": 5.0,  "out": 25.0, "name": "Opus 4.7"},
-    "claude-opus-4-6":  {"in": 5.0,  "out": 25.0, "name": "Opus 4.6"},
-    "claude-sonnet-5":  {"in": 3.0,  "out": 15.0, "name": "Sonnet 5"},
-    "claude-sonnet-4-6": {"in": 3.0, "out": 15.0, "name": "Sonnet 4.6"},
-    "claude-haiku-4-5": {"in": 1.0,  "out": 5.0,  "name": "Haiku 4.5"},
+    "claude-fable-5-1":  {"in": 10.0, "out": 50.0, "cr": 0.25, "name": "Fable 5.1"},
+    "claude-mythos-5-1": {"in": 10.0, "out": 50.0, "cr": 0.25, "name": "Mythos 5.1"},
+    "claude-fable-5":    {"in": 10.0, "out": 50.0, "name": "Fable 5"},
+    "claude-mythos-5":   {"in": 10.0, "out": 50.0, "name": "Mythos 5"},
+    "claude-opus-5-5":   {"in": 4.0,  "out": 20.0, "cr": 0.20, "name": "Opus 5.5"},
+    "claude-opus-5":     {"in": 5.0,  "out": 25.0, "name": "Opus 5"},
+    "claude-opus-4-8":   {"in": 5.0,  "out": 25.0, "name": "Opus 4.8"},
+    "claude-opus-4-7":   {"in": 5.0,  "out": 25.0, "name": "Opus 4.7"},
+    "claude-opus-4-6":   {"in": 5.0,  "out": 25.0, "name": "Opus 4.6"},
+    "claude-sonnet-5-5": {"in": 2.0,  "out": 10.0, "cr": 0.20, "name": "Sonnet 5.5"},
+    "claude-sonnet-5":   {"in": 2.0,  "out": 10.0, "name": "Sonnet 5"},
+    "claude-sonnet-4-6": {"in": 3.0,  "out": 15.0, "name": "Sonnet 4.6"},
+    "claude-haiku-5-5":  {"in": 0.10, "out": 0.50, "name": "Haiku 5.5"},
+    "claude-haiku-4-5":  {"in": 1.0,  "out": 5.0,  "name": "Haiku 4.5"},
 }
 CACHE_WRITE_5M = 1.25
 CACHE_WRITE_1H = 2.0
@@ -44,10 +50,10 @@ CACHE_READ = 0.1
 
 # 可在下拉框中选择的执行官候选模型
 EXECUTOR_CHOICES = [
-    "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
-    "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5",
+    "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8",
+    "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
 ]
-MAIN_CHOICES = ["claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-sonnet-5"]
+MAIN_CHOICES = ["claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"]
 
 # 执行官速度档位（frontmatter 的 effort 字段）。子代理不支持 /fast 极速模式，
 # effort 是官方支持的提速手段：档位越低思考越少 → 越快、越省 token。
@@ -70,8 +76,8 @@ def price_of(model_id):
 
 def most_expensive_model():
     """自动模式：主模型 = 价格表里最贵的（按输入价，其次输出价）。
-    Mythos 5 仅对特定组织开放，自动模式跳过它。"""
-    candidates = {k: v for k, v in PRICES.items() if k != "claude-mythos-5"}
+    Mythos 仅对特定组织开放，自动模式跳过它。同价时取表中靠前的（新版在前）。"""
+    candidates = {k: v for k, v in PRICES.items() if "mythos" not in k}
     return max(candidates, key=lambda k: (candidates[k]["in"], candidates[k]["out"]))
 
 
@@ -92,7 +98,7 @@ def cost_usd(model_id, usage):
         write_cost = ((w5 or 0) * CACHE_WRITE_5M + (w1 or 0) * CACHE_WRITE_1H) * p["in"]
     else:
         write_cost = cw * CACHE_WRITE_5M * p["in"]
-    return (inp * p["in"] + out * p["out"] + write_cost + cr * CACHE_READ * p["in"]) / 1e6
+    return (inp * p["in"] + out * p["out"] + write_cost + cr * p.get("cr", CACHE_READ * p["in"])) / 1e6
 
 
 # ---------------------------------------------------------------------------
